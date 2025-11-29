@@ -11,17 +11,3 @@ runs/
 
 # Ignore virtual environment
 venv/
-
-# Ignore model weights
-*.pt
-*.pth
-
-# Ignore Python cache
-__pycache__/
-*.pyc
-
-# Ignore images, videos if needed
-*.jpg
-*.png
-*.jpeg
-*.mp4
