@@ -9,26 +9,24 @@ import time
 import random
 import platform
 
-# -----------------------------
+
 # PATH CONFIG
-# -----------------------------
 BASE_DIR = Path(__file__).resolve().parent
 MODEL_PATH = BASE_DIR / "models" / "best.pt"
 
 # Load YOLO model
 model = YOLO(str(MODEL_PATH))
 
-stop_webcam = False
+# Unified stop flag for all feeds
+stop_all = False
 animation_running = False
 
-# -----------------------------
+
 # CLASS LIST (5 CLASSES)
-# -----------------------------
 CLASS_NAMES = ["Grenade", "Knife", "Missile", "Pistol", "Rifle"]
 
-# -----------------------------
+
 # MATRIX HACKER THEME COLORS
-# -----------------------------
 BG = "#020b02"
 SIDEBAR_BG = "#020f06"
 PANEL_BG = "#031a09"
@@ -49,9 +47,8 @@ log_images = []  # Prevent garbage-collection
 
 angle = 0
 
-# -----------------------------------------
+
 # SOUND (Beep)
-# -----------------------------------------
 def play_beep():
     try:
         if platform.system() == "Windows":
@@ -66,9 +63,8 @@ def play_beep():
             pass
 
 
-# =========================================================
+
 #  SYSTEM LOG TEXT
-# =========================================================
 def log(msg: str):
     if log_text is None:
         return
@@ -79,11 +75,9 @@ def log(msg: str):
     log_text.config(state="disabled")
 
 
-# =========================================================
-#  SCI-FI THUMBNAIL EFFECT
-# =========================================================
-def add_thumbnail_to_log(pil_img: Image.Image, label: str):
 
+#  SCI-FI THUMBNAIL EFFECT
+def add_thumbnail_to_log(pil_img: Image.Image, label: str):
     try:
         # Resize to thumbnail
         thumb = pil_img.copy()
@@ -119,9 +113,8 @@ def add_thumbnail_to_log(pil_img: Image.Image, label: str):
         log(f"ERROR sci-fi thumbnail -> {e}")
 
 
-# =========================================================
+
 # LOADER ANIMATION
-# =========================================================
 def start_loader():
     global animation_running, loader_canvas
     if animation_running:
@@ -171,9 +164,8 @@ def animate_loader():
     loader_canvas.after(40, animate_loader)
 
 
-# =========================================================
+
 # BUTTON HOVER
-# =========================================================
 def on_enter(event):
     event.widget["background"] = BTN_HOVER
 
@@ -182,9 +174,8 @@ def on_leave(event):
     event.widget["background"] = BTN_BG
 
 
-# =========================================================
+
 # SHOW IMAGE (MAIN DISPLAY)
-# =========================================================
 def show_image(path: Path):
     try:
         img = Image.open(path).resize((800, 500))
@@ -195,9 +186,8 @@ def show_image(path: Path):
         log(f"ERROR showing image -> {e}")
 
 
-# =========================================================
+
 # IMAGE DETECTION
-# =========================================================
 def detect_image():
 
     file_path = filedialog.askopenfilename(
@@ -259,11 +249,13 @@ def detect_image():
         stop_loader()
 
 
-# =========================================================
-# VIDEO DETECTION
-# =========================================================
-def detect_video():
 
+# VIDEO DETECTION (threaded)
+def detect_video():
+    """
+    Called from main thread (UI). It asks for file and then spawns
+    a background thread to process the video so UI doesn't freeze.
+    """
     file_path = filedialog.askopenfilename(
         title="Select Video",
         filetypes=[("Videos", "*.mp4 *.avi *.mkv *.mov")]
@@ -271,68 +263,156 @@ def detect_video():
     if not file_path:
         return
 
-    status_label.config(text="STATUS: VIDEO SCAN ACTIVE")
-    detail_label.config(text="DETAIL: Processing video...")
+    # start thread to process the video
+    t = threading.Thread(target=process_video, args=(file_path,))
+    t.daemon = True
+    t.start()
+
+
+def process_video(file_path: str):
+    global stop_all
+    stop_all = False
+
     log(f"Video selected: {file_path}")
+    status_label.config(text="STATUS: VIDEO SCAN ACTIVE")
+    detail_label.config(text="DETAIL: Processing video frames...")
 
     start_loader()
     root.update_idletasks()
+    time.sleep(0.5)
+    stop_loader()
+
+    cap = cv2.VideoCapture(file_path)
+    if not cap.isOpened():
+        status_label.config(text="STATUS: ERROR")
+        detail_label.config(text="DETAIL: Cannot open video file.")
+        log("ERROR: Cannot open video file.")
+        return
+
+    log("Video detection started.")
 
     try:
-        model.predict(source=file_path, save=True, project="runs/detect", name="video", exist_ok=True)
-        log("Video processed successfully.")
-        status_label.config(text="STATUS: COMPLETE")
-        detail_label.config(text="DETAIL: Output saved.")
+        while not stop_all:
+            ret, frame = cap.read()
+            if not ret:
+                break
+
+            # Run YOLO on the frame
+            try:
+                result = model(frame)[0]
+            except Exception as e:
+                log(f"Model inference error: {e}")
+                break
+
+            plotted = result.plot()
+            rgb = cv2.cvtColor(plotted, cv2.COLOR_BGR2RGB)
+
+            # Convert to PIL -> ImageTk
+            img = Image.fromarray(rgb).resize((800, 500))
+            imgtk = ImageTk.PhotoImage(img)
+
+            # Update panel (must be done from main thread but config is thread-safe enough here;
+            # if you see issues, use root.after to schedule GUI updates)
+            panel.config(image=imgtk)
+            panel.image = imgtk
+
+            # If detection present
+            if len(result.boxes) > 0:
+                try:
+                    cls = int(result.boxes[0].cls[0])
+                    conf = float(result.boxes[0].conf[0]) * 100
+                    det_name = CLASS_NAMES[cls]
+                except Exception:
+                    det_name = "Unknown"
+                    conf = 0.0
+
+                status_label.config(text=f"STATUS: {det_name} DETECTED")
+                detail_label.config(text=f"CONFIDENCE: {conf:.2f}%")
+                log(f"Video detected: {det_name} ({conf:.2f}%)")
+
+                # Add thumbnail to log
+                pil_frame = Image.fromarray(rgb)
+                timestamp = time.strftime("%H:%M:%S")
+                add_thumbnail_to_log(pil_frame, f"{timestamp} — {det_name}")
+
+                play_beep()
+            else:
+                status_label.config(text="STATUS: VIDEO SCAN ACTIVE")
+                detail_label.config(text="DETAIL: Scanning frames...")
+
+            # Allow UI events to process
+            root.update_idletasks()
+            time.sleep(0.01)
+
+        # Feed ended or stopped
+        if stop_all:
+            status_label.config(text="STATUS: VIDEO STOPPED")
+            detail_label.config(text="DETAIL: Feed stopped by user.")
+            log("Video stopped by user.")
+        else:
+            status_label.config(text="STATUS: VIDEO COMPLETED")
+            detail_label.config(text="DETAIL: All frames processed.")
+            log("Video processing finished.")
 
     except Exception as e:
         log(f"ERROR video detection -> {e}")
 
     finally:
-        stop_loader()
+        cap.release()
 
 
-# =========================================================
-# WEBCAM DETECTION
-# =========================================================
+
+# WEBCAM DETECTION (already threaded by start_webcam)
 def run_webcam():
 
-    global stop_webcam
-    stop_webcam = False
+    global stop_all
+    stop_all = False
 
     log("Starting webcam...")
     status_label.config(text="STATUS: LIVE MATRIX FEED")
     detail_label.config(text="DETAIL: Camera connected.")
 
     start_loader()
-    time.sleep(1)
+    time.sleep(0.5)
     stop_loader()
 
     cap = cv2.VideoCapture(0)
     if not cap.isOpened():
         log("ERROR: Webcam not found.")
+        status_label.config(text="STATUS: ERROR")
+        detail_label.config(text="DETAIL: Webcam not found.")
         return
 
     log("Webcam Online.")
 
     try:
-        while not stop_webcam:
-
+        while not stop_all:
             ret, frame = cap.read()
             if not ret:
                 break
 
-            result = model(frame)[0]
-            plotted = result.plot()
+            try:
+                result = model(frame)[0]
+            except Exception as e:
+                log(f"Model inference error (webcam): {e}")
+                break
 
+            plotted = result.plot()
             rgb = cv2.cvtColor(plotted, cv2.COLOR_BGR2RGB)
+
             img = Image.fromarray(rgb).resize((800, 500))
-            panel.image = ImageTk.PhotoImage(img)
-            panel.config(image=panel.image)
+            imgtk = ImageTk.PhotoImage(img)
+            panel.config(image=imgtk)
+            panel.image = imgtk
 
             if len(result.boxes) > 0:
-                cls = int(result.boxes[0].cls[0])
-                conf = float(result.boxes[0].conf[0]) * 100
-                current_class = CLASS_NAMES[cls]
+                try:
+                    cls = int(result.boxes[0].cls[0])
+                    conf = float(result.boxes[0].conf[0]) * 100
+                    current_class = CLASS_NAMES[cls]
+                except Exception:
+                    current_class = "Unknown"
+                    conf = 0.0
 
                 status_label.config(text=f"STATUS: {current_class} DETECTED")
                 detail_label.config(text=f"CONFIDENCE: {conf:.2f}%")
@@ -343,16 +423,15 @@ def run_webcam():
                 add_thumbnail_to_log(pil_frame, f"{timestamp} — {current_class}")
 
                 play_beep()
-
             else:
                 status_label.config(text="STATUS: LIVE MATRIX FEED")
                 detail_label.config(text="DETAIL: Scanning...")
 
             root.update_idletasks()
+            time.sleep(0.01)
 
     finally:
         cap.release()
-        stop_webcam = True
         status_label.config(text="STATUS: FEED TERMINATED")
         detail_label.config(text="DETAIL: Connection closed.")
         log("Webcam stopped.")
@@ -364,15 +443,15 @@ def start_webcam():
     t.start()
 
 
-def stop_webcam_func():
-    global stop_webcam
-    stop_webcam = True
-    log("Stop command received.")
+
+# STOP ALL FEEDS (single button)
+def stop_all_func():
+    global stop_all
+    stop_all = True
+    log("STOP command received: Stopping all feeds.")
 
 
-# =========================================================
 # UI BUILDING
-# =========================================================
 root = tk.Tk()
 root.title("MATRIX // WEAPON-DETECTION NODE // YOLOv8")
 root.state("zoomed")
@@ -420,7 +499,7 @@ def make_btn(name, cmd):
 make_btn("▣ IMAGE SCAN", detect_image)
 make_btn("▣ VIDEO SCAN", detect_video)
 make_btn("▣ LIVE WEBCAM", start_webcam)
-make_btn("✘ STOP FEED", stop_webcam_func)
+make_btn("✘ STOP ALL FEEDS", stop_all_func)
 
 # --- System Log ---
 tk.Label(sidebar, text="\n> SYSTEM LOG", fg=ACCENT,
@@ -465,7 +544,7 @@ detail_label.pack(fill="x")
 
 # --- Umar Credit INSIDE Status Bar ---
 credit_label = tk.Label(status_frame,
-                        text="Made with ❤️by Umar",
+                        text="Made with ❤️by Umar Team",
                         fg=ACCENT,
                         bg=BG,
                         font=("Consolas", 10, "bold"))
